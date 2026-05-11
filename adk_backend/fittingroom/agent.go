@@ -2,6 +2,8 @@ package fittingroom
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	_ "embed"
 	"errors"
 	"fmt"
@@ -41,6 +43,19 @@ type FittingToolResult struct {
 	GCSUrl       string `json:"gcs_url,omitempty" jsonschema:"the gs:// URI of the generated image stored in GCS; use this as user_image for subsequent fitting calls"`
 }
 
+// stableSeed produces a deterministic int32 seed from a string identifier
+// (e.g. an artifact name or gs:// URI). The same user image always yields
+// the same seed, which — combined with low temperature — makes the
+// gemini-2.5-flash-image output collapse to a narrow neighborhood around
+// the reference identity. Different accessory inputs still produce
+// different outfits because they change the prompt content, but the
+// face-rendering randomness is removed.
+func stableSeed(s string) int32 {
+	h := sha256.Sum256([]byte(s))
+	// Use the low 31 bits to stay in positive int32 range.
+	return int32(binary.BigEndian.Uint32(h[:4]) & 0x7FFFFFFF)
+}
+
 // gcsURIMimeType infers the MIME type from a GCS URI's file extension.
 func gcsURIMimeType(uri string) string {
 	switch strings.ToLower(filepath.Ext(uri)) {
@@ -68,10 +83,15 @@ func doFitting(ctx tool.Context, args FittingToolArgs) (FittingToolResult, error
 		userPart = userImgResp.Part
 	}
 
+	// Build the prompt in this exact order:
+	//   1. System instructions (identity-preservation rules)
+	//   2. All accessory/product images first — these are the things being applied
+	//   3. The user reference photo LAST, with a strong "this is the identity anchor"
+	//      label. Putting the reference image at the end gives it the most attention
+	//      from the model — image-gen models tend to weigh the most recent visual
+	//      input most heavily when composing the output.
 	parts := []*genai.Part{
 		genai.NewPartFromText(toolInstructions),
-		genai.NewPartFromText("User Reference Photo:"),
-		userPart,
 	}
 
 	var loaded int
@@ -82,12 +102,23 @@ func doFitting(ctx tool.Context, args FittingToolArgs) (FittingToolResult, error
 			continue
 		}
 		loaded += 1
-		parts = append(parts, genai.NewPartFromText("Accessory Images to Add:"))
+		parts = append(parts, genai.NewPartFromText(fmt.Sprintf("Product image %d to apply to the person below:", loaded)))
 		parts = append(parts, accResp.Part)
 	}
 	if loaded == 0 {
 		return FittingToolResult{}, errors.New("no valid product images found")
 	}
+
+	// Anchor the identity at the END of the prompt with maximally explicit framing.
+	parts = append(parts,
+		genai.NewPartFromText(
+			"=== IDENTITY ANCHOR ===\n"+
+				"The image below is the user's actual photograph. The person you generate MUST be this exact person.\n"+
+				"Do NOT alter their face geometry, eyes, nose, mouth, skin tone, hair color, hair length, or body shape.\n"+
+				"Use this image as the single ground truth for who the person is. Apply the products above to THIS person, unchanged.\n"+
+				"User photo (identity anchor):"),
+		userPart,
+	)
 
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		Backend:  genai.BackendVertexAI,
@@ -98,12 +129,19 @@ func doFitting(ctx tool.Context, args FittingToolArgs) (FittingToolResult, error
 		return FittingToolResult{}, err
 	}
 
-	// Temperature 0.05 (was 0.15) — push the model to produce near-deterministic
-	// output for the SAME inputs, which helps it stick to the reference identity
-	// instead of "creatively" reinterpreting the face.
+	// Deterministic generation:
+	//   - Temperature 0.05 (very low sampling variance)
+	//   - Seed fixed per-fitting-call, derived from a hash of the user image
+	//     identifier so the SAME user always gets a stable result. Different
+	//     accessory sets still produce different outfits, but the face stays
+	//     locked across the three parallel stylist calls because Seed + low
+	//     temperature collapse the sampling to a narrow neighborhood around
+	//     the reference identity.
+	seed := stableSeed(args.UserImage)
 	resp, err := client.Models.GenerateContent(ctx, "gemini-2.5-flash-image", []*genai.Content{genai.NewContentFromParts(parts, "user")}, &genai.GenerateContentConfig{
 		ResponseModalities: []string{"IMAGE"},
 		Temperature:        genai.Ptr(float32(0.05)),
+		Seed:               genai.Ptr(seed),
 	})
 	if err != nil {
 		return FittingToolResult{}, err
