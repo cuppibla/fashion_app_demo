@@ -28,7 +28,9 @@ type GenerateOutfitImageResult struct {
 
 func generateOutfitImage(ctx tool.Context, args GenerateOutfitImageArgs) (GenerateOutfitImageResult, error) {
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
-		APIKey: os.Getenv("GEMINI_API_KEY"),
+		Backend:  genai.BackendVertexAI,
+		Project:  os.Getenv("GOOGLE_CLOUD_PROJECT"),
+		Location: "global",
 	})
 	if err != nil {
 		return GenerateOutfitImageResult{}, err

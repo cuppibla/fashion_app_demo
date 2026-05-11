@@ -10,11 +10,13 @@ import (
 	"google.golang.org/genai"
 )
 
-func NewRootAgent(apiKey string, fittingAgent agent.Agent, catalogAgent agent.Agent, stylistAgent agent.Agent) (agent.Agent, error) {
+func NewRootAgent(project string, fittingAgent agent.Agent, catalogAgent agent.Agent, stylistAgent agent.Agent) (agent.Agent, error) {
 	ctx := context.Background()
 	// Using a fast model for the router/root agent
-	m, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
-		APIKey: apiKey,
+	m, err := gemini.NewModel(ctx, "gemini-3-flash-preview", &genai.ClientConfig{
+		Backend:  genai.BackendVertexAI,
+		Project:  project,
+		Location: "global",
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create model: %w", err)

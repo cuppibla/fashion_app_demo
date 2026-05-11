@@ -18,20 +18,20 @@ import (
 )
 
 func TestNewStylistAgent_Creation(t *testing.T) {
-	// API Key for Gemini model
-	apiKey := os.Getenv("GEMINI_API_KEY")
-	if apiKey == "" {
-		t.Skip("GEMINI_API_KEY not set, skipping integration test that requires Gemini model initialization.")
+	// Project for Vertex AI auth via ADC
+	project := os.Getenv("GOOGLE_CLOUD_PROJECT")
+	if project == "" {
+		t.Skip("GOOGLE_CLOUD_PROJECT not set, skipping integration test that requires Gemini model initialization.")
 	}
 
 	// Create actual Catalog Agent
-	catalogAgent, err := catalog.NewCatalogAgent(apiKey, "../catalog/catalog.yaml")
+	catalogAgent, err := catalog.NewCatalogAgent(project, "../catalog/catalog.yaml")
 	if err != nil {
 		t.Fatalf("Failed to create actual catalog agent: %v", err)
 	}
 
 	var stylistAgent agent.Agent
-	stylistAgent, err = NewStylistAgent(apiKey, catalogAgent)
+	stylistAgent, err = NewStylistAgent(project, catalogAgent)
 	if err != nil {
 		t.Fatalf("NewStylistAgent failed: %v", err)
 	}
@@ -46,19 +46,19 @@ func TestNewStylistAgent_Creation(t *testing.T) {
 }
 
 func TestStyleMe_Script(t *testing.T) {
-	apiKey := os.Getenv("GEMINI_API_KEY")
-	if apiKey == "" {
-		t.Skip("GEMINI_API_KEY not set, skipping agent interaction scenarios.")
+	project := os.Getenv("GOOGLE_CLOUD_PROJECT")
+	if project == "" {
+		t.Skip("GOOGLE_CLOUD_PROJECT not set, skipping agent interaction scenarios.")
 	}
 
 	// Create actual Catalog Agent
-	catalogAgent, err := catalog.NewCatalogAgent(apiKey, "../catalog/catalog.yaml")
+	catalogAgent, err := catalog.NewCatalogAgent(project, "../catalog/catalog.yaml")
 	if err != nil {
 		t.Fatalf("Failed to create actual catalog agent for scenarios: %v", err)
 	}
 
 	var stylistAgent agent.Agent
-	stylistAgent, err = NewStylistAgent(apiKey, catalogAgent)
+	stylistAgent, err = NewStylistAgent(project, catalogAgent)
 	if err != nil {
 		t.Fatalf("Failed to create stylist agent for scenarios: %v", err)
 	}

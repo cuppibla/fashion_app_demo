@@ -32,13 +32,9 @@ var enableWebUI = flag.Bool("webui", false, "start the ADK WebUI with the API se
 func main() {
 	flag.Parse()
 	godotenv.Load()
-	apikey := os.Getenv("GEMINI_API_KEY")
 	project := os.Getenv("GOOGLE_CLOUD_PROJECT")
 	bucket := os.Getenv("GCS_BUCKET")
 
-	if apikey == "" {
-		log.Fatal("GEMINI_API_KEY must be set.")
-	}
 	if project == "" {
 		log.Fatal("GOOGLE_CLOUD_PROJECT must be set.")
 	}
@@ -46,32 +42,28 @@ func main() {
 		log.Fatal("GCS_BUCKET must be set.")
 	}
 
-	artifacts, err := gcsartifact.NewService(context.Background(),
-		bucket)
-	// TODO: retry with api key after key restrictions propagage.
-	// bucket, option.WithAPIKey(apikey))
+	artifacts, err := gcsartifact.NewService(context.Background(), bucket)
 	if err != nil {
 		log.Fatalf("Failed to create artifact storage: %v", err)
 	}
-	// artifacts := artifact.InMemoryService()
 
-	catagent, err := catalog.NewCatalogAgent(apikey, "catalog/catalog.yaml")
+	catagent, err := catalog.NewCatalogAgent(project, "catalog/catalog.yaml")
 	if err != nil {
 		log.Fatalf("Failed to create catalog agent: %v", err)
 	}
 
 	// load agents
-	fitagent, err := fittingroom.NewFittingRoomAgent(apikey, catagent)
+	fitagent, err := fittingroom.NewFittingRoomAgent(project, catagent)
 	if err != nil {
 		log.Fatalf("Failed to create fitting agent: %v", err)
 	}
 
-	stylistAgent, err := stylist.NewStylistAgent(apikey, catagent)
+	stylistAgent, err := stylist.NewStylistAgent(project, catagent)
 	if err != nil {
 		log.Fatalf("Failed to create stylist agent: %v", err)
 	}
 
-	ragent, err := rootagent.NewRootAgent(apikey, fitagent, catagent, stylistAgent)
+	ragent, err := rootagent.NewRootAgent(project, fitagent, catagent, stylistAgent)
 	if err != nil {
 		log.Fatalf("Failed to create root agent: %v", err)
 	}
@@ -111,6 +103,34 @@ func main() {
 	r.Use(tools.LocalhostCORS)
 	r.PathPrefix("/api/").Handler(
 		http.StripPrefix("/api", tools.LogHandler(restHandler)))
+
+	// Serve the Flutter web build at the root so the whole demo runs on one port.
+	// Looks in two places:
+	//   1. ./flutter_web — for Cloud Run deploys (user copies the build in before deploying)
+	//   2. ../flutter_frontend/build/web — for local dev from the repo
+	// Falls back to index.html for client-side routing (single-page app).
+	var flutterDir string
+	for _, candidate := range []string{"./flutter_web", "../flutter_frontend/build/web"} {
+		if _, err := os.Stat(candidate); err == nil {
+			flutterDir = candidate
+			break
+		}
+	}
+	if flutterDir != "" {
+		fs := http.FileServer(http.Dir(flutterDir))
+		r.PathPrefix("/").HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			path := flutterDir + req.URL.Path
+			if info, err := os.Stat(path); err != nil || info.IsDir() {
+				http.ServeFile(w, req, flutterDir+"/index.html")
+				return
+			}
+			fs.ServeHTTP(w, req)
+		})
+		log.Printf("Serving Flutter web build from %s", flutterDir)
+	} else {
+		log.Printf("Flutter build not found — run `flutter build web` from flutter_frontend/ to enable the UI")
+	}
+
 	s := http.Server{
 		Addr:    fmt.Sprintf(":%d", *port),
 		Handler: r,

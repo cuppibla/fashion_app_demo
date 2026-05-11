@@ -3,10 +3,6 @@ set -e
 
 cd "$(dirname "$0")"
 
-go run . web \
-  --write-timeout=300s \
-  --read-timeout=60s \
-  --idle-timeout=120s \
-  api \
-  --sse-write-timeout=300s \
-  --webui_address=http://localhost:61982
+# Default run: serves the Flutter web build at /, API at /api/.
+# For agent debugging without Flutter, run: `go run . --webui` instead.
+go run .

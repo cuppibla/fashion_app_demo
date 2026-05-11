@@ -11,7 +11,7 @@
 ### What You'll Build
 
 
-In this codelab, you'll step into the shoes of a developer at **Thread Count**, a fictional retail brand with an existing Flutter shopping app. Your mission: add two AI-powered features that transform the online shopping experience.
+In this codelab, you'll step into the shoes of a developer building **Fashion App**, a Flutter shopping app for a fictional retail brand. Your mission: add two AI-powered features that transform the online shopping experience.
 
 
 1. **Virtual Fitting Room** — A user uploads a photo of themselves, selects a clothing item, and sees an AI-generated image of themselves wearing that item.
@@ -41,7 +41,8 @@ Flutter App  ──── HTTP/REST ────▶  ADK Go Backend
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
 | **Agent Framework** | ADK (Agent Development Kit) for Go | Multi-agent orchestration, sessions, artifacts |
-| **Agent Reasoning** | Gemini 3 Pro Preview | Powers the fitting room and stylist agents |
+| **Agent Reasoning (Pro)** | Gemini 3.1 Pro Preview | Powers the fitting room and stylist agents |
+| **Agent Reasoning (Flash)** | Gemini 3 Flash Preview | Powers the root and catalog agents (lightweight routing/lookup) |
 | **Image Generation** | Gemini 2.5 Flash Image | Generates try-on and outfit images |
 | **Frontend** | Flutter (Dart) | Cross-platform app (Web, iOS, Android) |
 | **Storage** | Google Cloud Storage | Stores product images and generated artifacts |
@@ -69,29 +70,18 @@ If the terminal doesn't appear at the bottom of the screen:
 > **Cloud Shell** comes with Go, Git, and the `gcloud` CLI pre-installed — no local setup needed.
 
 
-### 2. Install Flutter SDK
+### 2. Set Up Flutter SDK
 
 
-Cloud Shell doesn't include Flutter by default. Install it in your home directory so it persists across sessions:
-
-
-```bash
-cd ~
-git clone https://github.com/flutter/flutter.git -b stable --depth 1
-export PATH="$PATH:$HOME/flutter/bin"
-```
-
-
-Make the PATH persistent:
+Cloud Shell ships with Flutter pre-installed at `/google/flutter`. Because that directory is owned by a different system user, you'll hit a `fatal: detected dubious ownership` error the first time you run `flutter`. Add it to git's safe-directory list once:
 
 
 ```bash
-echo 'export PATH="$PATH:$HOME/flutter/bin"' >> ~/.bashrc
-source ~/.bashrc
+git config --global --add safe.directory /google/flutter
 ```
 
 
-Verify the installation:
+Verify Flutter is on your `PATH` and working:
 
 
 ```bash
@@ -99,13 +89,27 @@ flutter --version
 ```
 
 
+The first run downloads the Dart SDK and builds the Flutter tool — give it a minute. You should see something like `Flutter 3.x • channel stable`.
+
+
+> aside positive
+> **Prefer the bundled Flutter.** If you'd rather pin to your own stable clone (e.g., for a specific Flutter version), run:
+> ```bash
+> cd ~
+> git clone https://github.com/flutter/flutter.git -b stable --depth 1
+> echo 'export PATH="$HOME/flutter/bin:$PATH"' >> ~/.bashrc
+> source ~/.bashrc
+> ```
+> Note the `$HOME/flutter/bin` comes **before** `$PATH` so your clone wins over `/google/flutter`.
+
+
 ### 3. Clone the Repository
 
 
 ```bash
 cd ~
-git clone https://github.com/anthropics/thread-count-workshop.git
-cd thread-count-workshop
+git clone https://github.com/cuppibla/fashion_app_demo.git
+cd fashion_app_demo
 ```
 
 
@@ -113,7 +117,7 @@ cd thread-count-workshop
 
 
 ```
-thread-count-workshop/
+fashion_app_demo/
 ├── adk_backend/                 # Go backend with ADK agents
 │   ├── main.go                  # Entry point — wires all agents + REST server
 │   ├── catalog/                 # Catalog Agent — product lookup
@@ -171,16 +175,55 @@ thread-count-workshop/
 
 
 ```bash
-gcloud projects create thread-count-lab --name="Thread Count Lab"
-gcloud config set project thread-count-lab
+gcloud projects create fashion-app-demo --name="Fashion App Demo"
+gcloud config set project fashion-app-demo
 ```
 
 
 > aside positive
-> If the project ID is taken, append a random number (e.g., `thread-count-lab-42`).
+> If the project ID is taken, append a random number (e.g., `fashion-app-demo-42`).
 
 
-### 2. Enable Required APIs
+### 2. Link a Billing Account
+
+
+> aside negative
+> **This codelab assumes you already have an active billing account.** Vertex AI, Cloud Build, and Cloud Run all require billing — without it, the next step (`gcloud services enable`) will fail for `aiplatform.googleapis.com` and `cloudbuild.googleapis.com`, and even the APIs that do enable won't actually run workloads.
+
+
+List your billing accounts:
+
+
+```bash
+gcloud billing accounts list
+```
+
+
+Copy the `ACCOUNT_ID` (looks like `0X0X0X-0X0X0X-0X0X0X`) and link it to your project:
+
+
+```bash
+gcloud billing projects link fashion-app-demo \
+ --billing-account=YOUR_BILLING_ACCOUNT_ID
+```
+
+
+Verify the link:
+
+
+```bash
+gcloud billing projects describe fashion-app-demo
+```
+
+
+You should see `billingEnabled: true`.
+
+
+> aside positive
+> **Don't have a billing account?** Create one at [console.cloud.google.com/billing](https://console.cloud.google.com/billing). New Google Cloud users get **$300 in free credits**, which is plenty for this codelab — the Gemini API calls and Cloud Run usage here cost only a few cents. You'll need a credit card for verification, but you won't be charged unless you exceed the free tier and opt in to a paid account.
+
+
+### 3. Enable Required APIs
 
 
 ```bash
@@ -202,32 +245,39 @@ gcloud services enable \
 | `artifactregistry.googleapis.com` | **Artifact Registry** — stores built Docker images |
 
 
-### 3. Get a Gemini API Key
-
-
-👉 Go to [Google AI Studio](https://aistudio.google.com/apikey) and create an API key.
-
-
-> aside negative
-> The backend uses **two different authentication methods**: the Gemini API key (for agent reasoning) and Vertex AI project auth (for image generation via `fitting_tool`). Both are needed.
-
-
 ### 4. Create a GCS Bucket
 
 
 ```bash
 export PROJECT_ID=$(gcloud config get-value project)
-gsutil mb gs://thread-count-$PROJECT_ID
+gcloud storage buckets create gs://fashion-app-$PROJECT_ID \
+ --location=us-central1 \
+ --uniform-bucket-level-access
 ```
+
+
+> aside positive
+> Bucket names are globally unique across all of Google Cloud. Since `$PROJECT_ID` is already unique, `fashion-app-$PROJECT_ID` will be too. The `--uniform-bucket-level-access` flag is the modern default — it disables legacy ACLs in favor of IAM.
 
 
 ### 5. Upload Product Catalog Images
 
 
+The backend's `getProductImage` tool reads from `gs://$GCS_BUCKET/catalog-assets/images/<image_name>`. Upload the catalog images to that exact path:
+
+
 ```bash
-cd ~/thread-count-workshop
-gcloud storage cp -r flutter_frontend/assets/images/* \
- gs://thread-count-$PROJECT_ID/catalog-assets/images/
+cd ~/fashion_app_demo
+gcloud storage cp flutter_frontend/assets/images/*.png \
+ gs://fashion-app-$PROJECT_ID/catalog-assets/images/
+```
+
+
+Verify the upload (you should see a list of `.png` files):
+
+
+```bash
+gcloud storage ls gs://fashion-app-$PROJECT_ID/catalog-assets/images/
 ```
 
 
@@ -235,31 +285,39 @@ gcloud storage cp -r flutter_frontend/assets/images/* \
 
 
 ```bash
-cd ~/thread-count-workshop/adk_backend
+cd ~/fashion_app_demo/adk_backend
 cat > .env << EOF
-GEMINI_API_KEY=your_api_key_here
 GOOGLE_CLOUD_PROJECT=$PROJECT_ID
-GCS_BUCKET=thread-count-$PROJECT_ID
+GCS_BUCKET=fashion-app-$PROJECT_ID
 EOF
 ```
 
 
-👉 Replace `your_api_key_here` with your actual Gemini API key.
-
-
 > aside positive
-> The `.env` file is gitignored — never commit API keys to source control.
+> No API key is needed. Both Vertex AI (Gemini calls) and Cloud Storage (image uploads/downloads) authenticate through **Application Default Credentials** — set up in the next step. The `.env` file just tells the backend which project and bucket to use.
 
 
-### 7. Authenticate for Vertex AI
+### 7. Authenticate with Application Default Credentials
 
 
-The `fitting_tool` uses Vertex AI (not the API key) for image generation. Authenticate `gcloud`:
+One credential covers both Vertex AI and Cloud Storage:
 
 
 ```bash
 gcloud auth application-default login
 ```
+
+
+Cloud Shell may auto-detect your credentials and skip the browser flow — that's fine. Verify with:
+
+
+```bash
+gcloud auth application-default print-access-token | head -c 20 && echo "..."
+```
+
+
+> aside positive
+> **One auth path for everything.** The Go code uses `Backend: genai.BackendVertexAI` with your project ID for Gemini, and the Cloud Storage client uses the same ADC for `gs://` reads/writes. When you deploy to Cloud Run later, ADC is replaced by the Cloud Run service account automatically — no auth code changes needed.
 
 
 ---
@@ -279,19 +337,21 @@ The backend is built as a **multi-agent system** using ADK (Agent Development Ki
 
 
 ```
-                   ┌─────────────┐
-                   │ Root Agent  │  ← Routes requests to the right agent
-                   │ (gemini-2.5-│
-                   │   flash)    │
-                   └──────┬──────┘
+                   ┌──────────────┐
+                   │ Root Agent   │  ← Routes requests to the right agent
+                   │ (gemini-3-   │
+                   │  flash-      │
+                   │  preview)    │
+                   └──────┬───────┘
                           │
            ┌──────────────┼──────────────┐
            ▼              ▼              ▼
   ┌────────────────┐ ┌──────────┐ ┌────────────────┐
   │ Fitting Room   │ │ Catalog  │ │ Stylist        │
   │ Agent          │ │ Agent    │ │ Agent          │
-  │ (gemini-3-pro) │ │ (gemini- │ │ (gemini-3-pro) │
-  │                │ │ 2.5-flash│ │                │
+  │ (gemini-3.1-   │ │ (gemini- │ │ (gemini-3.1-   │
+  │  pro-preview)  │ │  3-flash-│ │  pro-preview)  │
+  │                │ │  preview)│ │                │
   │ Tools:         │ │          │ │ Tools:         │
   │ • fitting_tool │ │ Tools:   │ │ • fitting_tool │
   │ • getProduct   │ │ • list   │ │ • getProduct   │
@@ -306,10 +366,10 @@ The backend is built as a **multi-agent system** using ADK (Agent Development Ki
 
 | Agent | Model | Role |
 |-------|-------|------|
-| **Root Agent** | `gemini-2.5-flash` | Traffic cop. Reads the user's message and delegates to the right specialist agent. Uses a fast, lightweight model because it only needs to make routing decisions. |
-| **Catalog Agent** | `gemini-2.5-flash` | Product expert. Loads the product catalog from a YAML file and answers product queries. Also lightweight — it's just looking up data. |
-| **Fitting Room Agent** | `gemini-3-pro-preview` | Virtual try-on specialist. Takes a user photo + product image and generates a composite image of the person wearing that item. Uses a more capable model because it needs to reason about images. |
-| **Stylist Agent** | `gemini-3-pro-preview` | Fashion advisor. Given location, occasion, and preferences, it curates 3 outfit combinations from the catalog. Can generate try-on images for each outfit. Also uses the capable model for creative reasoning. |
+| **Root Agent** | `gemini-3-flash-preview` | Traffic cop. Reads the user's message and delegates to the right specialist agent. Uses a fast, lightweight model because it only needs to make routing decisions. |
+| **Catalog Agent** | `gemini-3-flash-preview` | Product expert. Loads the product catalog from a YAML file and answers product queries. Also lightweight — it's just looking up data. |
+| **Fitting Room Agent** | `gemini-3.1-pro-preview` | Virtual try-on specialist. Takes a user photo + product image and generates a composite image of the person wearing that item. Uses a more capable model because it needs to reason about images. |
+| **Stylist Agent** | `gemini-3.1-pro-preview` | Fashion advisor. Given location, occasion, and preferences, it curates 3 outfit combinations from the catalog. Can generate try-on images for each outfit. Also uses the capable model for creative reasoning. |
 
 
 ### The Entry Point: `main.go`
@@ -745,9 +805,9 @@ The `toolInstructions` (embedded from `tool_instructions.md`) is crucial — it 
 
 ```go
    client, _ := genai.NewClient(ctx, &genai.ClientConfig{
-       Backend:  genai.BackendVertexAI,                   // Uses Vertex AI, NOT API key
-       Project:  os.Getenv("GOOGLE_CLOUD_PROJECT"),
-       Location: "global",
+       Backend:  genai.BackendVertexAI,                 // Vertex AI endpoint
+       Project:  os.Getenv("GOOGLE_CLOUD_PROJECT"),     // From your .env
+       Location: "global",                              // Multi-region endpoint
    })
 
 
@@ -760,7 +820,7 @@ The `toolInstructions` (embedded from `tool_instructions.md`) is crucial — it 
 ```
 
 
-Notice the authentication difference: the fitting tool uses **Vertex AI** (`genai.BackendVertexAI` with project credentials), while the agents themselves use **API key** auth. This is because `gemini-2.5-flash-image` is called directly through the Vertex AI endpoint for image generation, while the agent orchestration models (`gemini-3-pro-preview`, `gemini-2.5-flash`) use the Gemini API.
+All four agents and the image-gen tool share a single authentication path: `Backend: genai.BackendVertexAI` with the project ID, authenticated via Application Default Credentials. The orchestration models (`gemini-3.1-pro-preview`, `gemini-3-flash-preview`) and the image model (`gemini-2.5-flash-image`) all sit behind the same Vertex AI endpoint, and the same ADC also authorizes Cloud Storage access — one credential, every call.
 
 
 **Step 4: Save the result**
@@ -956,8 +1016,12 @@ The simplest agent — just 31 lines:
 
 
 ```go
-func NewRootAgent(apiKey string, fittingAgent, catalogAgent, stylistAgent agent.Agent) (agent.Agent, error) {
-   m, _ := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{APIKey: apiKey})
+func NewRootAgent(project string, fittingAgent, catalogAgent, stylistAgent agent.Agent) (agent.Agent, error) {
+   m, _ := gemini.NewModel(ctx, "gemini-3-flash-preview", &genai.ClientConfig{
+       Backend:  genai.BackendVertexAI,
+       Project:  project,
+       Location: "global",
+   })
 
 
    return llmagent.New(llmagent.Config{
@@ -974,7 +1038,7 @@ func NewRootAgent(apiKey string, fittingAgent, catalogAgent, stylistAgent agent.
 ```
 
 
-It uses `gemini-2.5-flash` (the fastest model) because routing decisions are simple — the LLM just needs to read the user's intent and pick the right sub-agent. No tools needed; `SubAgents` handles delegation automatically.
+It uses `gemini-3-flash-preview` (the fastest model) because routing decisions are simple — the LLM just needs to read the user's intent and pick the right sub-agent. No tools needed; `SubAgents` handles delegation automatically.
 
 
 ---
@@ -1306,68 +1370,69 @@ The `refineWithFeedback` method sends a plain text message to the same session �
 
 
 ## 🚀 Run the App Locally
-**Duration: 3 min**
+**Duration: 5 min**
 
 
-### Start the Backend
+For a smooth Cloud Shell experience, the Go backend serves the compiled Flutter web app from the **same port** (8080). One process, one preview URL, no cross-origin headaches, no editing of config files.
 
 
-Open a terminal and start the ADK Go backend:
+### 1. Build the Flutter Web Bundle
 
 
 ```bash
-cd ~/thread-count-workshop/adk_backend
+cd ~/fashion_app_demo/flutter_frontend
+flutter pub get
+flutter build web
+```
+
+
+This produces `flutter_frontend/build/web/` — a directory of static files (HTML, JS, assets). The backend will serve these as soon as it sees the directory exists.
+
+
+> aside positive
+> Re-run `flutter build web` whenever you change Dart code. The backend picks up the new build on its next request — no restart needed.
+
+
+### 2. Start the Backend (Which Also Serves the UI)
+
+
+Open a terminal and run:
+
+
+```bash
+cd ~/fashion_app_demo/adk_backend
 ./run.sh
 ```
 
 
-You should see:
+You should see something like:
 
 
 ```
-Starting agent server on port 8080 ...
+Serving Flutter web build from ../flutter_frontend/build/web
 ```
 
 
-The server exposes:
-- **REST API** at `http://localhost:8080/api/` — used by the Flutter app
-- **ADK Dev UI** at `http://localhost:8080/` — interactive chat for testing agents directly
+The server now exposes everything on port 8080:
+- **`/`** — Flutter web app (the shopping UI)
+- **`/api/`** — ADK REST endpoints (called by the Flutter app)
+- **ADK Dev UI** — also at `/` when there's no Flutter build; useful for direct agent debugging
 
 
-### Start the Flutter Frontend
+### 3. Open Web Preview
 
 
-Open a **second terminal** and start the Flutter app:
+1. In Cloud Shell, click the **Web Preview** icon (top-right) → **Preview on port 8080**
+2. The Flutter shopping app loads in a new tab
+3. Browse the product catalog and select an item
+4. Tap the person icon (👤) to start the Try-On flow
+5. Upload a photo and watch the AI generate a try-on image
+6. Tap "Style Me" to get outfit recommendations
+7. Type follow-up feedback like "make it more casual" — same-session refinement
 
 
-```bash
-cd ~/thread-count-workshop/flutter_frontend
-flutter pub get
-flutter run -d web-server --web-port=61983 --web-hostname=0.0.0.0
-```
-
-
-> aside positive
-> In Cloud Shell, use `flutter run -d web-server` instead of `-d chrome` since there's no local browser. Cloud Shell provides a web preview URL.
-
-
-### Verify the Connection
-
-
-1. Open the Flutter app in your browser (via Cloud Shell's Web Preview on port 8888)
-2. Browse the product catalog and select an item
-3. Tap the person icon (👤) to start the Try-On flow
-4. Upload a photo and watch the AI generate a try-on image
-5. Tap "Style Me" to get outfit recommendations
-
-
-### Explore the ADK Dev UI
-
-
-The ADK Dev UI (port 8080) lets you chat with agents directly — useful for debugging:
-- Select the `fitting room` app
-- Send a text message to test the agent without the Flutter UI
-- Inspect session state, artifacts, and the full conversation history
+> aside negative
+> **Why same-origin matters in Cloud Shell.** If the backend ran on 8080 and Flutter ran on 8081 separately, the Flutter JS (running in your browser) would try to call `http://localhost:8080/api` — but `localhost` from the browser means *your laptop*, not the Cloud Shell VM. Serving both from the same port fixes this entirely: the Flutter app's API calls go to `/api` relative to the same preview URL.
 
 
 ---
@@ -1377,21 +1442,34 @@ The ADK Dev UI (port 8080) lets you chat with agents directly — useful for deb
 **Duration: 5 min**
 
 
-### Deploy the Backend
+### Bundle the Flutter Build into the Backend
 
 
-From the `adk_backend` directory:
+The Cloud Run container ships both the API and the UI from one image. Copy the Flutter web build into `adk_backend/flutter_web/` — that's the first path the Go server checks when picking which UI to serve:
 
 
 ```bash
-cd ~/thread-count-workshop/adk_backend
+cd ~/fashion_app_demo/flutter_frontend
+flutter build web
+rm -rf ../adk_backend/flutter_web
+cp -r build/web ../adk_backend/flutter_web
+```
 
 
-gcloud run deploy thread-count-backend \
+(If you've been iterating locally, you may already have `build/web` from the Run-Locally step. Re-running `flutter build web` is still fine.)
+
+
+### Deploy the Backend (Serves API + UI)
+
+
+```bash
+cd ~/fashion_app_demo/adk_backend
+
+gcloud run deploy fashion-app-backend \
  --source . \
  --region us-central1 \
  --allow-unauthenticated \
- --set-env-vars "GEMINI_API_KEY=$(grep GEMINI_API_KEY .env | cut -d= -f2),GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GCS_BUCKET=thread-count-$PROJECT_ID" \
+ --set-env-vars "GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GCS_BUCKET=fashion-app-$PROJECT_ID" \
  --memory 1Gi \
  --cpu 2 \
  --timeout 300s \
@@ -1400,36 +1478,24 @@ gcloud run deploy thread-count-backend \
 ```
 
 
-When the deploy finishes, copy the **Service URL** (e.g., `https://thread-count-backend-xyz-uc.a.run.app`).
+When the deploy finishes, you'll get a **Service URL** like `https://fashion-app-backend-xyz-uc.a.run.app`. Open it in a browser — the Flutter shopping app loads from `/`, and its API calls go to `/api/` on the same host. **No frontend config edits needed, no API key passed.**
 
 
-### Update the Frontend Configuration
+> aside positive
+> Because [app_config.dart](flutter_frontend/lib/app_config.dart) uses the same-origin relative URL `/api`, the deployed Flutter app automatically talks to the deployed backend. The same build works locally and on Cloud Run with zero changes.
 
 
-Edit `flutter_frontend/lib/app_config.dart` to point to the Cloud Run URL:
-
-
-```dart
-class AppConfig {
- static const String adkBackendUrl =
-     'https://thread-count-backend-xyz-uc.a.run.app/api';  // ← Your Cloud Run URL
-}
-```
-
-
-### Deploy the Frontend (Optional)
-
-
-Build the Flutter web app and deploy it to Cloud Run as well:
-
-
-```bash
-cd ~/thread-count-workshop/flutter_frontend
-flutter build web
-```
-
-
-Then deploy the `build/web` directory using any static hosting service or Cloud Run with a simple Dockerfile.
+> aside negative
+> **Cloud Run service account permissions.** The default Compute Engine service account that Cloud Run runs as needs `roles/aiplatform.user` (call Vertex AI) and `roles/storage.objectUser` (read/write your bucket). The default `Editor` role most new projects start with covers both, so the deploy usually works as-is. If you tightened your project's IAM, grant those two roles explicitly:
+> ```bash
+> SA=$(gcloud iam service-accounts list \
+>  --filter="email:*-compute@developer.gserviceaccount.com" \
+>  --format="value(email)")
+> gcloud projects add-iam-policy-binding $PROJECT_ID \
+>  --member="serviceAccount:$SA" --role="roles/aiplatform.user"
+> gcloud projects add-iam-policy-binding $PROJECT_ID \
+>  --member="serviceAccount:$SA" --role="roles/storage.objectUser"
+> ```
 
 
 ### Verify the Deployment

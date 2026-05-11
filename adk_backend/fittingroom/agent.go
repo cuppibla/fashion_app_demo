@@ -176,11 +176,13 @@ func NewFittingTool() (tool.Tool, error) {
 	}, doFitting)
 }
 
-func NewFittingRoomAgent(apiKey string, catalogAgent agent.Agent) (agent.Agent, error) {
+func NewFittingRoomAgent(project string, catalogAgent agent.Agent) (agent.Agent, error) {
 	c := retryablehttp.NewClient()
 	ctx := context.Background()
-	m, err := gemini.NewModel(ctx, "gemini-3-pro-preview", &genai.ClientConfig{
-		APIKey:     apiKey,
+	m, err := gemini.NewModel(ctx, "gemini-3.1-pro-preview", &genai.ClientConfig{
+		Backend:    genai.BackendVertexAI,
+		Project:    project,
+		Location:   "global",
 		HTTPClient: c.StandardClient(),
 	})
 	if err != nil {

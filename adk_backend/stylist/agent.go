@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 
 	"goagents/fittingroom"
 	"goagents/tools"
@@ -27,6 +28,73 @@ var instructions string
 
 const stateKeyPreviousProducts = "previously_used_products"
 const stateKeyUserImageStr = "user_base_image_str"
+
+// ExtractAndInjectUserImage is a BeforeModelCallback that keeps the user's
+// try-on base image (a gs:// URI from the prior fitting room result) available
+// across multi-turn feedback. On the first request, the Flutter app embeds the
+// URI in a text part marked with "User try-on base image". This callback
+// extracts and saves it to session state. On follow-up turns (e.g. "make it
+// more casual"), the URI isn't in the message — so the callback retrieves it
+// from state and re-injects it as a reminder so the LLM still knows which
+// image to pass to fitting_tool.
+func ExtractAndInjectUserImage(ctx agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
+	const marker = "User try-on base image"
+	var foundURI string
+
+	// Search the latest user message for the marker and extract the gs:// URI.
+	for i := len(req.Contents) - 1; i >= 0; i-- {
+		if req.Contents[i].Role != "user" {
+			continue
+		}
+		for _, part := range req.Contents[i].Parts {
+			if !strings.Contains(part.Text, marker) {
+				continue
+			}
+			idx := strings.Index(part.Text, "gs://")
+			if idx < 0 {
+				continue
+			}
+			rest := part.Text[idx:]
+			end := len(rest)
+			for j, r := range rest {
+				if r == ' ' || r == '\n' || r == '\t' {
+					end = j
+					break
+				}
+			}
+			foundURI = rest[:end]
+		}
+		break
+	}
+
+	if foundURI != "" {
+		slog.Info("Saving user base image URI to state", "uri", foundURI)
+		if err := ctx.State().Set(stateKeyUserImageStr, foundURI); err != nil {
+			slog.Warn("Failed to save user image URI to state", "err", err)
+		}
+		return nil, nil
+	}
+
+	// No URI in current message — try to re-inject from state.
+	val, err := ctx.State().Get(stateKeyUserImageStr)
+	if err != nil {
+		return nil, nil
+	}
+	savedURI, ok := val.(string)
+	if !ok || savedURI == "" {
+		return nil, nil
+	}
+	slog.Info("Re-injecting saved user base image URI", "uri", savedURI)
+	for i := len(req.Contents) - 1; i >= 0; i-- {
+		if req.Contents[i].Role == "user" {
+			req.Contents[i].Parts = append(req.Contents[i].Parts,
+				genai.NewPartFromText(fmt.Sprintf(
+					"REMINDER: Use this gs:// URI as user_image when calling fitting_tool: %s", savedURI)))
+			break
+		}
+	}
+	return nil, nil
+}
 
 // InjectPreviousProducts is a BeforeModelCallback that reads previously selected
 // product IDs from session state and injects a hint into the prompt so the LLM
@@ -102,11 +170,13 @@ func extractProductIDs(text string) []string {
 
 // NewStylistAgent creates an agent that acts as a fashion stylist,
 // using the catalog agent as a tool to find items for the user.
-func NewStylistAgent(apiKey string, catalogAgent agent.Agent) (agent.Agent, error) {
+func NewStylistAgent(project string, catalogAgent agent.Agent) (agent.Agent, error) {
 	c := retryablehttp.NewClient()
 	ctx := context.Background()
-	m, err := gemini.NewModel(ctx, "gemini-3-pro-preview", &genai.ClientConfig{
-		APIKey:     apiKey,
+	m, err := gemini.NewModel(ctx, "gemini-3.1-pro-preview", &genai.ClientConfig{
+		Backend:    genai.BackendVertexAI,
+		Project:    project,
+		Location:   "global",
 		HTTPClient: c.StandardClient(),
 	})
 	if err != nil {
@@ -140,6 +210,7 @@ func NewStylistAgent(apiKey string, catalogAgent agent.Agent) (agent.Agent, erro
 			tools.LogAgentInputCallback,
 		},
 		BeforeModelCallbacks: []llmagent.BeforeModelCallback{
+			ExtractAndInjectUserImage,
 			InjectPreviousProducts,
 		},
 		AfterModelCallbacks: []llmagent.AfterModelCallback{

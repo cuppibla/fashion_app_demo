@@ -57,14 +57,18 @@ func ListProducts(ctx tool.Context, args ListProductsArgs) (ListProductsResult, 
 	return ListProductsResult{Products: catalogProducts}, nil
 }
 
-func NewCatalogAgent(apiKey string, filename string) (agent.Agent, error) {
+func NewCatalogAgent(project string, filename string) (agent.Agent, error) {
 	// Preload catalog to fail early if file is missing/invalid
 	if filename == "" {
 		filename = defaultCatalogFile
 	}
 
 	ctx := context.Background()
-	m, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{APIKey: apiKey})
+	m, err := gemini.NewModel(ctx, "gemini-3-flash-preview", &genai.ClientConfig{
+		Backend:  genai.BackendVertexAI,
+		Project:  project,
+		Location: "global",
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create model: %w", err)
 	}
