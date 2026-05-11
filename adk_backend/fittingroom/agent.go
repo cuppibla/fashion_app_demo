@@ -228,24 +228,43 @@ func NewFittingRoomAgent(project string, catalogAgent agent.Agent) (agent.Agent,
 	return fittingAgent, nil
 }
 
-// SaveIncomingBlobs stores inline data from the user into Artifact storage
+// SaveIncomingBlobs stores inline data from the user into Artifact storage.
+// Iterates ALL parts and saves every one that carries inline binary data —
+// e.g. the user's photo at index 1 AND the product image at index 2.
+// Previously this function returned after saving the first artifact, which
+// silently dropped the second image and made fitting_tool fail with
+// "artifact not found" when the LLM tried to load it.
 func SaveIncomingBlobs(ctx agent.CallbackContext) (*genai.Content, error) {
-	slog.Info("saving incoming blobs", "r", ctx.UserContent())
 	contents := ctx.UserContent()
-	if len(contents.Parts) > 0 {
-		for pindex, p := range contents.Parts {
-			if p.InlineData != nil {
-				aname := fmt.Sprintf("upload_%s_%d", ctx.InvocationID(), pindex)
-				slog.Info("Saving inline data artifact", "filename", p.InlineData.DisplayName, "mimetype", p.InlineData.MIMEType, "artifact", aname)
-				// save the incoming blob.
-				if _, err := ctx.Artifacts().Save(ctx, aname, p); err != nil {
-					slog.Error("Failed to save artifact", "error", err)
-					return nil, err
-				}
-				return nil, nil
-			}
-		}
+	if contents == nil || len(contents.Parts) == 0 {
+		return nil, nil
 	}
+	slog.Info("saving incoming blobs", "numParts", len(contents.Parts), "role", contents.Role)
+	saved := 0
+	for pindex, p := range contents.Parts {
+		// Per-part diagnostic so we can tell from logs what each part actually is.
+		slog.Info("part",
+			"index", pindex,
+			"hasText", p.Text != "",
+			"hasInlineData", p.InlineData != nil,
+			"hasFileData", p.FileData != nil,
+		)
+		if p.InlineData == nil {
+			continue
+		}
+		aname := fmt.Sprintf("upload_%s_%d", ctx.InvocationID(), pindex)
+		slog.Info("Saving inline data artifact",
+			"filename", p.InlineData.DisplayName,
+			"mimetype", p.InlineData.MIMEType,
+			"artifact", aname,
+		)
+		if _, err := ctx.Artifacts().Save(ctx, aname, p); err != nil {
+			slog.Error("Failed to save artifact", "error", err, "artifact", aname)
+			return nil, err
+		}
+		saved++
+	}
+	slog.Info("saved incoming blobs", "count", saved)
 	return nil, nil
 }
 func fittingSchemaMap() map[string]any {
