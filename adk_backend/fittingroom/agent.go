@@ -98,9 +98,12 @@ func doFitting(ctx tool.Context, args FittingToolArgs) (FittingToolResult, error
 		return FittingToolResult{}, err
 	}
 
+	// Temperature 0.05 (was 0.15) — push the model to produce near-deterministic
+	// output for the SAME inputs, which helps it stick to the reference identity
+	// instead of "creatively" reinterpreting the face.
 	resp, err := client.Models.GenerateContent(ctx, "gemini-2.5-flash-image", []*genai.Content{genai.NewContentFromParts(parts, "user")}, &genai.GenerateContentConfig{
 		ResponseModalities: []string{"IMAGE"},
-		Temperature:        genai.Ptr(float32(0.15)),
+		Temperature:        genai.Ptr(float32(0.05)),
 	})
 	if err != nil {
 		return FittingToolResult{}, err

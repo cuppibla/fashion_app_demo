@@ -27,15 +27,58 @@ var instructions string
 
 const stateKeyPreviousProducts = "previously_used_products"
 const stateKeyUserImageStr = "user_base_image_str"
+const stateKeyUserImageArtifact = "user_base_image_artifact"
+
+// LockUserImageArtifact is a BeforeAgentCallback that captures the artifact
+// name of the user's uploaded photo and pins it to session state. This is
+// the deterministic anchor for face identity across multi-turn refinement:
+// every fitting_tool invocation from this session is steered toward using
+// THIS exact artifact as user_image, instead of any other image the LLM
+// might find in context (e.g. a previously generated outfit).
+//
+// Runs after SaveIncomingBlobs (which actually saves the artifacts), so by
+// the time this callback fires, the artifact already exists in storage.
+func LockUserImageArtifact(ctx agent.CallbackContext) (*genai.Content, error) {
+	// If we already have one pinned from an earlier turn, leave it alone —
+	// multi-turn refinement should re-use the original, not whatever was
+	// uploaded most recently.
+	if existing, err := ctx.State().Get(stateKeyUserImageArtifact); err == nil {
+		if s, ok := existing.(string); ok && s != "" {
+			slog.Info("User base image artifact already pinned to state, keeping", "artifact", s)
+			return nil, nil
+		}
+	}
+
+	// First inline image in the user's message is the base photo.
+	contents := ctx.UserContent()
+	if contents == nil {
+		return nil, nil
+	}
+	for pindex, p := range contents.Parts {
+		if p.InlineData == nil {
+			continue
+		}
+		artifactName := fmt.Sprintf("upload_%s_%d", ctx.InvocationID(), pindex)
+		slog.Info("Pinning user base image artifact to state", "artifact", artifactName)
+		if err := ctx.State().Set(stateKeyUserImageArtifact, artifactName); err != nil {
+			slog.Warn("Failed to pin user image artifact to state", "err", err)
+		}
+		return nil, nil
+	}
+	return nil, nil
+}
 
 // ExtractAndInjectUserImage is a BeforeModelCallback that keeps the user's
-// try-on base image (a gs:// URI from the prior fitting room result) available
-// across multi-turn feedback. On the first request, the Flutter app embeds the
-// URI in a text part marked with "User try-on base image". This callback
-// extracts and saves it to session state. On follow-up turns (e.g. "make it
-// more casual"), the URI isn't in the message — so the callback retrieves it
-// from state and re-injects it as a reminder so the LLM still knows which
-// image to pass to fitting_tool.
+// base image reference available across multi-turn feedback. The reference can
+// be either a gs:// URI (from a prior fitting room result, sent by Flutter as
+// "User try-on base image" text) OR a pinned artifact name (saved by
+// LockUserImageArtifact above when Flutter sends inline bytes).
+//
+// On the first request, this callback finds the URI in the message and saves
+// it to state. On follow-up turns ("make it more casual"), the URI isn't
+// re-sent — so the callback retrieves it (or the pinned artifact name) from
+// state and re-injects it as an explicit reminder to the LLM, so it routes
+// the right input to fitting_tool every time.
 func ExtractAndInjectUserImage(ctx agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
 	const marker = "User try-on base image"
 	var foundURI string
@@ -74,25 +117,36 @@ func ExtractAndInjectUserImage(ctx agent.CallbackContext, req *model.LLMRequest)
 		return nil, nil
 	}
 
-	// No URI in current message — try to re-inject from state.
-	val, err := ctx.State().Get(stateKeyUserImageStr)
-	if err != nil {
-		return nil, nil
+	// Prefer a saved gs:// URI if we have one (cross-session reuse path).
+	if val, err := ctx.State().Get(stateKeyUserImageStr); err == nil {
+		if savedURI, ok := val.(string); ok && savedURI != "" {
+			slog.Info("Re-injecting saved user base image URI", "uri", savedURI)
+			injectReminder(req, fmt.Sprintf(
+				"REMINDER: ALWAYS use this gs:// URI as user_image when calling fitting_tool. Do NOT use any other image. URI: %s",
+				savedURI))
+			return nil, nil
+		}
 	}
-	savedURI, ok := val.(string)
-	if !ok || savedURI == "" {
-		return nil, nil
-	}
-	slog.Info("Re-injecting saved user base image URI", "uri", savedURI)
-	for i := len(req.Contents) - 1; i >= 0; i-- {
-		if req.Contents[i].Role == "user" {
-			req.Contents[i].Parts = append(req.Contents[i].Parts,
-				genai.NewPartFromText(fmt.Sprintf(
-					"REMINDER: Use this gs:// URI as user_image when calling fitting_tool: %s", savedURI)))
-			break
+
+	// Fall back to the pinned artifact name (inline-upload path).
+	if val, err := ctx.State().Get(stateKeyUserImageArtifact); err == nil {
+		if savedArt, ok := val.(string); ok && savedArt != "" {
+			slog.Info("Re-injecting pinned user base image artifact", "artifact", savedArt)
+			injectReminder(req, fmt.Sprintf(
+				"REMINDER: ALWAYS use the artifact named %q as user_image when calling fitting_tool. This is the user's original photo. Do NOT use any generated_fitting_* artifact or any other image as user_image — those are outputs, not the source of identity.",
+				savedArt))
 		}
 	}
 	return nil, nil
+}
+
+func injectReminder(req *model.LLMRequest, text string) {
+	for i := len(req.Contents) - 1; i >= 0; i-- {
+		if req.Contents[i].Role == "user" {
+			req.Contents[i].Parts = append(req.Contents[i].Parts, genai.NewPartFromText(text))
+			return
+		}
+	}
 }
 
 // InjectPreviousProducts is a BeforeModelCallback that reads previously selected
@@ -207,6 +261,7 @@ func NewStylistAgent(project string, catalogAgent agent.Agent) (agent.Agent, err
 		},
 		BeforeAgentCallbacks: []agent.BeforeAgentCallback{
 			fittingroom.SaveIncomingBlobs,
+			LockUserImageArtifact, // pin the original photo's artifact name to state for identity continuity
 			tools.LogAgentInputCallback,
 		},
 		BeforeModelCallbacks: []llmagent.BeforeModelCallback{
