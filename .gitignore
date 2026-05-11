@@ -56,6 +56,7 @@ adk_backend/flutter_web/
 
 # Internal design notes (kept local, not for public repo)
 adk_backend/docs/auth-and-retries.md
+adk_backend/docs/identity-preservation.md
 
 # IDE configs
 .claude/
