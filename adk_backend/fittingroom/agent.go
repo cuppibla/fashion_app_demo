@@ -15,7 +15,6 @@ import (
 	"github.com/google/uuid"
 
 	"cloud.google.com/go/storage"
-	"github.com/hashicorp/go-retryablehttp"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/model/gemini"
@@ -177,13 +176,14 @@ func NewFittingTool() (tool.Tool, error) {
 }
 
 func NewFittingRoomAgent(project string, catalogAgent agent.Agent) (agent.Agent, error) {
-	c := retryablehttp.NewClient()
 	ctx := context.Background()
+	// Don't pass a custom HTTPClient — the genai SDK needs to wrap its own
+	// OAuth transport around the client when using ADC. Passing one we made
+	// ourselves bypasses that wrapping and produces 401 CREDENTIALS_MISSING.
 	m, err := gemini.NewModel(ctx, "gemini-3.1-pro-preview", &genai.ClientConfig{
-		Backend:    genai.BackendVertexAI,
-		Project:    project,
-		Location:   "global",
-		HTTPClient: c.StandardClient(),
+		Backend:  genai.BackendVertexAI,
+		Project:  project,
+		Location: "global",
 	})
 	if err != nil {
 		log.Fatalf("Failed to create model: %v", err)

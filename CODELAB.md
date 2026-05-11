@@ -199,7 +199,10 @@ gcloud billing accounts list
 ```
 
 
-Copy the `ACCOUNT_ID` (looks like `0X0X0X-0X0X0X-0X0X0X`) and link it to your project:
+**Look at the `OPEN` column.** It must say `True`. If it says `False` (common with an expired free trial), the account is closed and won't actually pay for anything — skip ahead to the troubleshooting block below before continuing.
+
+
+Copy the `ACCOUNT_ID` of an `OPEN: True` account (looks like `0X0X0X-0X0X0X-0X0X0X`) and link it to your project:
 
 
 ```bash
@@ -216,11 +219,37 @@ gcloud billing projects describe fashion-app-demo
 ```
 
 
-You should see `billingEnabled: true`.
+You should see `billingEnabled: true`. If you see `billingEnabled: false` even after linking, the account is closed (`OPEN: False`) — see the troubleshooting block below.
 
 
 > aside positive
 > **Don't have a billing account?** Create one at [console.cloud.google.com/billing](https://console.cloud.google.com/billing). New Google Cloud users get **$300 in free credits**, which is plenty for this codelab — the Gemini API calls and Cloud Run usage here cost only a few cents. You'll need a credit card for verification, but you won't be charged unless you exceed the free tier and opt in to a paid account.
+
+
+> aside negative
+> **Troubleshooting: `OPEN: False` / `billingEnabled: false` / `UREQ_PROJECT_BILLING_NOT_OPEN`.**
+>
+> If you ran `gcloud services enable ...` and got an error like:
+> ```
+> ERROR: (gcloud.services.enable) FAILED_PRECONDITION: Billing account for
+> project '...' is not open. Billing must be enabled for activation of
+> service(s) '...' to proceed.
+> ...
+> reason: UREQ_PROJECT_BILLING_NOT_OPEN
+> ```
+> **that means you need a payment method on the billing account.** Your free-trial account has closed (trial expired, credit used up, or no card on file), so even though the project is "linked" to it, no service can be turned on. Fix it like this:
+>
+> 1. Open [console.cloud.google.com/billing](https://console.cloud.google.com/billing) in your browser.
+> 2. Click on the trial account (the one with `OPEN: False`).
+> 3. Look for **Upgrade**, **Reactivate**, or **Add payment method** — the exact button depends on the trial's state. Add a credit/debit card.
+> 4. Alternatively, click **Create account** at the top of the billing page to set up a fresh paid account with a new card.
+> 5. Confirm the fix back in Cloud Shell:
+>    ```bash
+>    gcloud billing accounts list --filter="open:true"
+>    ```
+>    This should now return at least one account. Re-run the `link` command above with that `ACCOUNT_ID`, then retry the `enable` command in the next step.
+>
+> The codelab's actual usage costs only a few cents — adding a card unlocks the APIs without committing you to ongoing charges.
 
 
 ### 3. Enable Required APIs
@@ -300,15 +329,22 @@ EOF
 ### 7. Authenticate with Application Default Credentials
 
 
-One credential covers both Vertex AI and Cloud Storage:
+**You must run this before starting the backend locally.** The Go backend uses ADC to authenticate every call to Vertex AI (Gemini) and Cloud Storage. Without ADC, the backend will start up but every try-on request will fail with a 401 `CREDENTIALS_MISSING`.
+
+
+One credential covers both services. Run these two commands in order:
 
 
 ```bash
+# 1. Log in (opens a browser; in Cloud Shell, paste the verification code back)
 gcloud auth application-default login
+
+# 2. Attach your project as the quota / billing project for ADC
+gcloud auth application-default set-quota-project $(gcloud config get-value project)
 ```
 
 
-Cloud Shell may auto-detect your credentials and skip the browser flow — that's fine. Verify with:
+Verify ADC is healthy:
 
 
 ```bash
@@ -316,8 +352,15 @@ gcloud auth application-default print-access-token | head -c 20 && echo "..."
 ```
 
 
+You should see ~20 characters of a token followed by `...`. If it errors, the login didn't take — re-run step 1.
+
+
 > aside positive
 > **One auth path for everything.** The Go code uses `Backend: genai.BackendVertexAI` with your project ID for Gemini, and the Cloud Storage client uses the same ADC for `gs://` reads/writes. When you deploy to Cloud Run later, ADC is replaced by the Cloud Run service account automatically — no auth code changes needed.
+
+
+> aside negative
+> **You'll need to redo this for each new account or fresh Cloud Shell session.** ADC is stored in `~/.config/gcloud/application_default_credentials.json` per Google account. If you switch accounts (or Cloud Shell hands you an ephemeral home), the file may be missing or out of date. Run both commands above again. Symptoms of stale ADC: backend logs show `401 CREDENTIALS_MISSING` even after the codelab's setup was completed earlier.
 
 
 ---
@@ -1376,7 +1419,35 @@ The `refineWithFeedback` method sends a plain text message to the same session �
 For a smooth Cloud Shell experience, the Go backend serves the compiled Flutter web app from the **same port** (8080). One process, one preview URL, no cross-origin headaches, no editing of config files.
 
 
-### 1. Build the Flutter Web Bundle
+### Before you start — sanity-check ADC
+
+
+The backend needs **Application Default Credentials** to call Vertex AI. If you finished step 7 of the project setup in *this* Cloud Shell session and *this* Google account, you're good. If you're returning after a break, switched accounts, or aren't sure, take 5 seconds to verify:
+
+
+```bash
+gcloud auth application-default print-access-token | head -c 20 && echo "..."
+```
+
+
+If that prints ~20 characters of a token, you're set. If it errors, **re-run step 7 of the project setup**:
+```bash
+gcloud auth application-default login
+gcloud auth application-default set-quota-project $(gcloud config get-value project)
+```
+
+
+You'll use **two Cloud Shell terminals**:
+- **Terminal A** — runs the backend continuously (`./run.sh`). Leave it open.
+- **Terminal B** — runs the Flutter web build once (`flutter build web`). Exits when done.
+
+The order doesn't matter — you can start either first. But for the cleanest first-run experience, build Flutter first so the backend has a UI to serve from the moment it starts.
+
+
+### 1. Terminal B — Build the Flutter Web Bundle (one-shot)
+
+
+Open a new Cloud Shell tab (the **+** at the top of the terminal panel), then:
 
 
 ```bash
@@ -1386,17 +1457,27 @@ flutter build web
 ```
 
 
-This produces `flutter_frontend/build/web/` — a directory of static files (HTML, JS, assets). The backend will serve these as soon as it sees the directory exists.
+This produces `flutter_frontend/build/web/` — a directory of static files (HTML, JS, assets) — and exits when finished. The backend will serve these as soon as it sees the directory exists.
 
 
 > aside positive
-> Re-run `flutter build web` whenever you change Dart code. The backend picks up the new build on its next request — no restart needed.
+> Re-run `flutter build web` in Terminal B whenever you change Dart code. The backend in Terminal A picks up the new build on the next request — **no restart needed**.
 
 
-### 2. Start the Backend (Which Also Serves the UI)
+> aside negative
+> **`fatal: detected dubious ownership in repository at '/google/flutter'` (×4)**
+>
+> You'll see this if you're in a fresh Cloud Shell session or signed in with a different Google account than when you ran the setup. The fix is the same one-liner from [§ Prerequisites step 2.2](#2-set-up-flutter-sdk) — it just needs to run once per account:
+> ```bash
+> git config --global --add safe.directory /google/flutter
+> ```
+> Then re-run `flutter pub get && flutter build web`. The config is stored in `~/.gitconfig`, so it persists across future sessions for **this** account.
 
 
-Open a terminal and run:
+### 2. Terminal A — Start the Backend (long-running)
+
+
+In your original Cloud Shell terminal:
 
 
 ```bash
@@ -1413,10 +1494,68 @@ Serving Flutter web build from ../flutter_frontend/build/web
 ```
 
 
-The server now exposes everything on port 8080:
+**Leave this terminal running** — the backend stays up for as long as `run.sh` is alive. To stop it, hit `Ctrl+C`.
+
+The server exposes everything on port 8080:
 - **`/`** — Flutter web app (the shopping UI)
 - **`/api/`** — ADK REST endpoints (called by the Flutter app)
 - **ADK Dev UI** — also at `/` when there's no Flutter build; useful for direct agent debugging
+
+
+> aside negative
+> **Troubleshooting `./run.sh` output**
+>
+> **`Flutter build not found — run flutter build web ...`**
+> The backend started, but there's no UI to serve. You skipped step 1, or the build failed. In Terminal B:
+> ```bash
+> cd ~/fashion_app_demo/flutter_frontend
+> flutter pub get
+> flutter build web
+> ```
+> Leave Terminal A's backend running — it picks up the new build on the next request, no restart needed.
+>
+> **`Error 401 ... CREDENTIALS_MISSING` when the user uploads a photo**
+> The backend is running but can't authenticate to Vertex AI. ADC is missing or stale. From Terminal A, redo step 7 of the project setup:
+> ```bash
+> gcloud auth application-default login
+> gcloud auth application-default set-quota-project $(gcloud config get-value project)
+> ```
+> Then in Terminal A, also clear any stale credential env vars before restarting:
+> ```bash
+> unset GOOGLE_APPLICATION_CREDENTIALS
+> ./run.sh
+> ```
+> Sanity-check that ADC works for Vertex AI specifically (replace `$PROJECT_ID` if needed):
+> ```bash
+> ACCESS_TOKEN=$(gcloud auth application-default print-access-token)
+> curl -sS -X POST \
+>  -H "Authorization: Bearer $ACCESS_TOKEN" \
+>  -H "Content-Type: application/json" \
+>  -H "x-goog-user-project: $(gcloud config get-value project)" \
+>  "https://aiplatform.googleapis.com/v1beta1/projects/$(gcloud config get-value project)/locations/global/publishers/google/models/gemini-3-flash-preview:generateContent" \
+>  -d '{"contents":[{"role":"user","parts":[{"text":"ping"}]}]}'
+> ```
+> If this returns a JSON `candidates` array, ADC is healthy; the issue is elsewhere. If it 403s with `SERVICE_DISABLED`, run `gcloud services enable aiplatform.googleapis.com` again. If it 403s with `PERMISSION_DENIED`, your account lacks `roles/aiplatform.user` on this project.
+>
+> **`Warning: The user provided project/location will take precedence over the API key from the environment variable.`**
+> You'll see this once per agent (four times total). It's harmless — the Go code is intentionally using ADC + project, and the SDK is just noting that any `GOOGLE_API_KEY` in your environment is being ignored. The most common cause is a stale `.env` file from an older version of the codelab that included a `GOOGLE_API_KEY=...` line. To silence the warnings, regenerate `.env`:
+> ```bash
+> export PROJECT_ID=$(gcloud config get-value project)
+> cd ~/fashion_app_demo/adk_backend
+> cat > .env << EOF
+> GOOGLE_CLOUD_PROJECT=$PROJECT_ID
+> GCS_BUCKET=fashion-app-$PROJECT_ID
+> EOF
+> ```
+> Then restart `./run.sh` in Terminal A. **Also check that `$PROJECT_ID` actually has a value** before generating `.env` — `gcloud config get-value project` returns `(unset)` if the current gcloud config has no project, which produces an empty `.env` and a `bucket doesn't exist` error.
+>
+> **`storage: bucket doesn't exist: Error 404`**
+> Your `.env` has an empty or wrong `GCS_BUCKET`. Run `cat ~/fashion_app_demo/adk_backend/.env` — if `GCS_BUCKET=fashion-app-` (truncated, no project), `gcloud config get-value project` returned empty when you ran step 6. Fix:
+> ```bash
+> gcloud config set project YOUR_PROJECT_ID
+> # then regenerate .env as in step 6
+> ```
+> Also confirm the bucket actually exists on this project: `gcloud storage ls gs://fashion-app-$(gcloud config get-value project)`. If not, run step 4 (create bucket) and step 5 (upload images).
 
 
 ### 3. Open Web Preview

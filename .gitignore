@@ -54,6 +54,9 @@ adk_backend/.env
 # Flutter build copied into the backend for Cloud Run packaging
 adk_backend/flutter_web/
 
+# Internal design notes (kept local, not for public repo)
+adk_backend/docs/auth-and-retries.md
+
 # IDE configs
 .claude/
 
